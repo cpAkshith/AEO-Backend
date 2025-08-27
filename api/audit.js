@@ -1,4 +1,3 @@
-// Vercel Edge Function using OpenRouter (no OpenAI key)
 export const config = { runtime: "edge" };
 
 function json(obj, status = 200) {
