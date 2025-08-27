@@ -1,15 +1,33 @@
+// Vercel Edge Function using OpenRouter (no OpenAI key)
+export const config = { runtime: "edge" };
 
-// Serverless API: POST /api/audit  { "url": "https://example.com" }
-export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.status(200).end();
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: {
+      "content-type": "application/json",
+      "Access-Control-Allow-Origin": "*"
+    }
+  });
+}
+
+export default async function handler(req) {
+  // CORS & method
+  if (req.method === "OPTIONS") {
+    return new Response(null, {
+      status: 200,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type"
+      }
+    });
+  }
+  if (req.method !== "POST") return json({ error: "POST only" }, 405);
 
   try {
-    if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
-    const { url } = req.body || {};
-    if (!url) return res.status(400).json({ error: "Missing url" });
+    const { url } = await req.json();
+    if (!url) return json({ error: "Missing url" }, 400);
 
     const html = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } }).then(r => r.text());
     const text = html
@@ -17,45 +35,50 @@ export default async function handler(req, res) {
       .replace(/<style[\s\S]*?<\/style>/gi, " ")
       .replace(/<[^>]+>/g, " ")
       .replace(/\s+/g, " ")
-      .slice(0, 8000);
+      .slice(0, 6000);
 
     const prompt = `
-You are an AEO editor. Using ONLY the provided text, return JSON with:
+You are an AEO editor. Using ONLY the provided text, return STRICT JSON:
 {
- "summary": "2-sentence summary",
- "faqs": [{"q":"...","a":"..."}],
- "qas":  [{"q":"...","a":"..."}],
+ "summary": "2 sentences",
+ "faqs": [{"q":"...","a":"..."} x5],
+ "qas":  [{"q":"...","a":"..."} x3],
  "howto": null
-}`;
-    const ai = await fetch("https://api.openai.com/v1/chat/completions", {
+}
+If info is missing, return empty arrays/null. Return ONLY the JSON.
+TEXT:
+${text}`;
+
+    const aiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
+        "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://your-domain.example",
+        "X-Title": "AEO Audit API"
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model: "meta-llama/llama-3.1-8b-instruct:free",
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: "Return only valid JSON. Do not invent facts." },
-          { role: "user", content: prompt + "\n\nTEXT:\n" + text }
+          { role: "user", content: prompt }
         ]
       })
-    }).then(r => r.json());
+    });
 
-    const content = ai?.choices?.[0]?.message?.content || "{}";
+    const aiJson = await aiRes.json();
+    const content = aiJson?.choices?.[0]?.message?.content || "{}";
     const output = JSON.parse(content);
 
-    const score = (out => {
-      let s = 0;
-      if (out.summary) s += 20;
-      if (out.faqs && out.faqs.length >= 5) s += 20;
-      if (out.qas && out.qas.length >= 3) s += 20;
-      return s + 40; // basic completeness
-    })(output);
+    let score = 0;
+    if (output.summary) score += 20;
+    if (Array.isArray(output.faqs) && output.faqs.length >= 5) score += 20;
+    if (Array.isArray(output.qas) && output.qas.length >= 3) score += 20;
+    score += 40;
 
-    return res.status(200).json({ score, output });
+    return json({ score, output }, 200);
   } catch (e) {
-    return res.status(500).json({ error: String(e) });
+    return json({ error: String(e.message || e) }, 500);
   }
 }
